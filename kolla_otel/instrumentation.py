@@ -49,6 +49,7 @@ __all__ = [
     "managed_environment",
     "agent_image",
     "stage_paths",
+    "sitecustomize_content",
     "agent_bind",
     "apply_agent_mount",
     "remove_agent_mount",
@@ -409,20 +410,26 @@ DEFAULT_SERVICES: list[dict[str, Any]] = [
 EVENTLET_ENV_KEY = "OTEL_PYTHON_EVENTLET_MONKEY_PATCH"
 
 #: Service names (the hyphenated ``name``) that get the eventlet monkey-patch by
-#: default. EMPTY on purpose: recent oslo.service (2026.1) has services that
-#: previously ran on eventlet now request the threading backend explicitly
-#: (nova-scheduler via ``nova.monkey_patch.patch(backend='threading')``; every
-#: neutron service via ``neutron.cmd.server/agents.__init__ ->
-#: init_backend(BackendType.THREADING)``). Applying the eventlet patch first
-#: selects the eventlet backend, so those calls raise
-#: ``oslo_service BackendAlreadySelected`` and kill the process at import.
-#: The OpenStack instrumentation (oslo-log / oslo-messaging / keystonemiddleware
-#: / openstacksdk) is backend-agnostic, so tracing is not lost. Opt a service in
-#: via ``otel_eventlet_extra_services`` only when it genuinely runs under
-#: eventlet and needs cross-green-thread context propagation. Mirrors
-#: ``otel_eventlet_services`` in the role defaults (kept in sync by
-#: test_instrumentation.py).
-DEFAULT_EVENTLET_SERVICES: list[str] = []
+#: default. Only the daemons that call ``init_backend(BackendType.EVENTLET)``
+#: are listed; the threading-backend services (nova-scheduler, every neutron
+#: service) are deliberately excluded — in 2026.1 they call
+#: ``init_backend(BackendType.THREADING)`` (or
+#: ``nova.monkey_patch.patch(backend='threading')``) and would raise
+#: ``oslo_service BackendAlreadySelected`` if the eventlet patch selected the
+#: eventlet backend first. The WSGI/mod_wsgi API servers (keystone, nova-api,
+#: cinder-api, glance-api, heat-api, placement-api) are also excluded because
+#: they never call ``init_backend``. Extend with
+#: ``otel_eventlet_extra_services`` for services that genuinely run under
+#: eventlet. Mirrors ``otel_eventlet_services`` in the role defaults (kept in
+#: sync by test_instrumentation.py).
+DEFAULT_EVENTLET_SERVICES: list[str] = [
+    "nova-conductor",
+    "nova-compute",
+    "cinder-scheduler",
+    "cinder-volume",
+    "cinder-backup",
+    "heat-engine",
+]
 
 
 def deep_merge(
@@ -526,6 +533,108 @@ def stage_paths(host_lib_path: str, language: str) -> tuple[str, str]:
     """
     base = host_lib_path or DEFAULT_HOST_LIB_PATH
     return f"{base}/{language}", f"{base}/.{language}-image-id"
+
+
+# ---------------------------------------------------------------------------
+# Log-correlation bootstrap (sitecustomize.py)
+# ---------------------------------------------------------------------------
+# Embedded as a string so the action-plugin path has no file dependency:
+# it works identically from a source checkout and from ``pip install .``
+# (where Hatch places the Ansible tree under ``share/kolla-ansible/ansible``,
+# not adjacent to ``kolla_otel/``). The canonical copy in
+# ``ansible/roles/otel_instrument/files/sitecustomize.py`` is the same
+# content, kept for the explicit role path that copies it directly.
+_SITECUSTOMIZE_PY = '''\
+"""kolla-otel log-correlation bootstrap.
+
+Guarantees ``record.otelTraceID`` and ``record.otelSpanID`` exist on every
+log record before any handler or formatter sees it, eliminating the::
+
+    ValueError: Formatting field not found in record: 'otelTraceID'
+
+crash that occurs when a green thread (eventlet) or any background thread
+emits a log line while no OTel span is active.
+
+When an OTel span *is* active the real 32/16-hex IDs are stamped; otherwise
+the OTel-spec all-zero "invalid" IDs are used so the Datadog log-pipeline
+grok rule still matches and uncorrelated lines pass through with a
+valid-but-null ID instead of raising.
+
+Mechanism
+---------
+Patches ``logging.Logger.handle`` so the IDs are set before the normal
+handle path (filter check → handler dispatch) runs. This covers every logger
+instance and every handler regardless of creation order.
+
+The module is auto-imported by Python's :mod:`site` mechanism: it is staged
+into the agent mount directory which is already on ``PYTHONPATH``.
+
+Safety
+------
+The patched code never raises: any import or SDK error falls through to the
+zero-ID default, so a partially-initialised agent can not take down a
+service's log output.
+"""
+
+import logging
+
+_ZERO_TRACE_ID = "0" * 32   # OTel "invalid trace ID"
+_ZERO_SPAN_ID = "0" * 16    # OTel "invalid span ID"
+
+
+def _ensure_otel_ids(record):
+    """Set ``otelTraceID`` / ``otelSpanID`` on *record* if not already present.
+
+    Reads the active OTel span when one exists; otherwise stamps the all-zero
+    "invalid" IDs so format strings referencing ``%(otelTraceID)s`` and
+    ``%(otelSpanID)s`` always resolve.
+    """
+    # Already stamped by a preceding filter (e.g. the OTel agent's own
+    # log-correlation filter) — leave the real IDs alone.
+    if getattr(record, "otelTraceID", None) and getattr(record, "otelSpanID", None):
+        return
+
+    trace_id = _ZERO_TRACE_ID
+    span_id = _ZERO_SPAN_ID
+    try:
+        from opentelemetry.trace import get_current_span  # noqa: WPS433
+        ctx = get_current_span().get_span_context()
+        if ctx is not None and getattr(ctx, "is_valid", False):
+            trace_id = format(ctx.trace_id, "032x")
+            span_id = format(ctx.span_id, "016x")
+    except Exception:
+        # SDK not loaded, no active span, or any other error — fall through to
+        # the zero-ID default. Never propagate an exception from here: it would
+        # break the service's log output entirely.
+        pass
+
+    record.otelTraceID = trace_id
+    record.otelSpanID = span_id
+
+
+# --- Patch Logger.handle -----------------------------------------------------
+_original_handle = logging.Logger.handle
+
+
+def _patched_handle(self, record):
+    _ensure_otel_ids(record)
+    return _original_handle(self, record)
+
+
+logging.Logger.handle = _patched_handle
+'''
+
+
+def sitecustomize_content() -> str:
+    """Return the text of the log-correlation ``sitecustomize.py`` bootstrap.
+
+    The content is embedded in this module so it is available regardless of
+    whether the package is used from a source checkout or installed via
+    ``pip install .`` (where Hatch relocates the Ansible tree under
+    ``share/kolla-ansible/ansible`` and the file-path relative lookup used
+    to fail silently, skipping the log-correlation installation).
+    """
+    return _SITECUSTOMIZE_PY
 
 
 def agent_bind(host_lib_path: str, language: str, mount_path: str) -> str:
