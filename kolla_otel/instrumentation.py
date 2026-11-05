@@ -598,6 +598,16 @@ if os.environ.get("OTEL_PYTHON_EVENTLET_MONKEY_PATCH", "").lower() in (
     except Exception:
         pass
 
+    # The agent's oslo_service distro imports oslo_service during initialize();
+    # that makes oslo_service auto-select the default 'threading' backend, and
+    # the service's own init_backend(EVENTLET) then raises BackendAlreadySelected.
+    # Select the eventlet backend first (same backend => later call is a no-op).
+    try:
+        from oslo_service import backend as _os_backend
+        _os_backend.init_backend(_os_backend.BackendType.EVENTLET)
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 # 2. Bootstrap the OTel agent
 # ---------------------------------------------------------------------------
