@@ -604,6 +604,13 @@ if os.environ.get("OTEL_PYTHON_EVENTLET_MONKEY_PATCH", "").lower() in (
 try:
     from opentelemetry.instrumentation.auto_instrumentation._load import _load
     _load()
+    # The agent sets OTEL_PYTHON_CONFIGURATOR to claim it has configured
+    # oslo_service. This prevents services (horizon, WSGI APIs) from running
+    # their own oslo_service backend init, causing:
+    #   "Backend module oslo_service.backend._threading not found"
+    # Clear it so the service's normal initialization path proceeds.
+    # The agent's tracing instrumentation (WSGI, requests, etc.) remains active.
+    os.environ.pop("OTEL_PYTHON_CONFIGURATOR", None)
 except ImportError:
     pass
 except Exception as _exc:
