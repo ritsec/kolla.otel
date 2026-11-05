@@ -109,7 +109,8 @@ otel_language_defaults:
     source_path: "/autoinstrumentation"
     mount_path: "/otel-auto-instrumentation-python"
     activation:
-      PYTHONPATH: "/otel-auto-instrumentation-python/opentelemetry/instrumentation/auto_instrumentation:/otel-auto-instrumentation-python"
+      # Our directory comes FIRST so our sitecustomize.py loads (not the agent's).
+      PYTHONPATH: "/otel-auto-instrumentation-python:/otel-auto-instrumentation-python/opentelemetry/instrumentation/auto_instrumentation"
   java:
     image_component: "autoinstrumentation-java"
     source_path: "/javaagent.jar"
