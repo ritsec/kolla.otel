@@ -367,15 +367,6 @@ class KollaContainerActionTestCase:
         assert "JAVA_TOOL_OPTIONS" in env  # java activation
         assert env["OTEL_SERVICE_NAME"] == "svc"
 
-    def test_python_activation_sets_oslo_service_distro(self):
-        """Every Python target gets the oslo.service OTEL distro/configurator
-        by default (language activation)."""
-        sink = {}
-        _plugin(_TARGET_ARGS, sink).run(task_vars=dict(_ENABLED))
-        env = sink["args"]["environment"]
-        assert env["OTEL_PYTHON_DISTRO"] == "oslo_service"
-        assert env["OTEL_PYTHON_CONFIGURATOR"] == "oslo_service"
-
     def test_eventlet_patch_applied_to_default_services(self):
         """nova-conductor is in DEFAULT_EVENTLET_SERVICES and gets the
         eventlet monkey-patch by default. The service is still fully
@@ -385,7 +376,6 @@ class KollaContainerActionTestCase:
         _plugin(args, sink).run(task_vars=dict(_ENABLED))
         env = sink["args"]["environment"]
         assert env["OTEL_PYTHON_EVENTLET_MONKEY_PATCH"] == "true"
-        assert env["OTEL_PYTHON_DISTRO"] == "oslo_service"
         assert "kolla_otel.managed_env" in sink["args"]["labels"]
 
     def test_no_eventlet_patch_for_threading_services(self):
@@ -397,7 +387,6 @@ class KollaContainerActionTestCase:
         _plugin(args, sink).run(task_vars=dict(_ENABLED))
         env = sink["args"]["environment"]
         assert "OTEL_PYTHON_EVENTLET_MONKEY_PATCH" not in env
-        assert env["OTEL_PYTHON_DISTRO"] == "oslo_service"
 
     def test_wsgi_service_has_no_monkey_patch(self):
         """A uWSGI/mod_wsgi service (keystone) must NOT be monkey-patched."""
@@ -406,8 +395,6 @@ class KollaContainerActionTestCase:
         _plugin(args, sink).run(task_vars=dict(_ENABLED))
         env = sink["args"]["environment"]
         assert "OTEL_PYTHON_EVENTLET_MONKEY_PATCH" not in env
-        # ...but it is still instrumented (distro + activation applied).
-        assert env["OTEL_PYTHON_DISTRO"] == "oslo_service"
         assert "kolla_otel.managed_env" in sink["args"]["labels"]
 
     def test_eventlet_extra_services_opt_in(self):

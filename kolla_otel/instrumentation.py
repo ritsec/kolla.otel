@@ -123,12 +123,6 @@ LANGUAGE_DEFAULTS: dict[str, dict[str, Any]] = {
                 "instrumentation/auto_instrumentation:"
                 "/otel-auto-instrumentation-python"
             ),
-            # OpenStack services build on oslo.service; its OpenTelemetry
-            # distro/configurator wires the SDK up the way OpenStack expects
-            # (config via oslo.config, correct service naming, …). Applied as
-            # activation so it is always set for the Python agent.
-            "OTEL_PYTHON_DISTRO": "oslo_service",
-            "OTEL_PYTHON_CONFIGURATOR": "oslo_service",
         },
     },
     "java": {
@@ -418,17 +412,17 @@ EVENTLET_ENV_KEY = "OTEL_PYTHON_EVENTLET_MONKEY_PATCH"
 #: ``oslo_service BackendAlreadySelected`` if the eventlet patch selected the
 #: eventlet backend first. The WSGI/mod_wsgi API servers (keystone, nova-api,
 #: cinder-api, glance-api, heat-api, placement-api) are also excluded because
-#: they never call ``init_backend``. Extend with
-#: ``otel_eventlet_extra_services`` for services that genuinely run under
-#: eventlet. Mirrors ``otel_eventlet_services`` in the role defaults (kept in
-#: sync by test_instrumentation.py).
+#: they never call ``init_backend``. ``heat-engine`` is also excluded: in
+#: 2026.1 it calls ``init_backend(BackendType.THREADING)`` (confirmed from
+#: the live error). Extend with ``otel_eventlet_extra_services`` for services
+#: that genuinely run under eventlet. Mirrors ``otel_eventlet_services`` in
+#: the role defaults (kept in sync by test_instrumentation.py).
 DEFAULT_EVENTLET_SERVICES: list[str] = [
     "nova-conductor",
     "nova-compute",
     "cinder-scheduler",
     "cinder-volume",
     "cinder-backup",
-    "heat-engine",
 ]
 
 
