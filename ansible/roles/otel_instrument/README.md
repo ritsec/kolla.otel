@@ -48,20 +48,16 @@ simply absent. Vendor plugins (mlnx/eswitchd/infoblox) can be added via
 
 ### OpenStack Python defaults
 
-Python targets get two OpenStack-aware defaults out of the box:
+Python targets get one OpenStack-aware default out of the box:
 
-- **oslo.service distro.** `OTEL_PYTHON_DISTRO=oslo_service` and
-  `OTEL_PYTHON_CONFIGURATOR=oslo_service` are set as part of the Python
-  language activation (override via `otel_languages`), so the agent bootstraps
-  the way OpenStack (oslo.service) expects.
 - **eventlet monkey-patching.** `OTEL_PYTHON_EVENTLET_MONKEY_PATCH` is set
   for services in `otel_eventlet_services` + `otel_eventlet_extra_services`.
-  The default list covers the six daemons that call
+  The default list covers the five daemons that call
   `init_backend(BackendType.EVENTLET)` — `nova-conductor`, `nova-compute`,
-  `cinder-scheduler`, `cinder-volume`, `cinder-backup`, and `heat-engine` —
+  `cinder-scheduler`, `cinder-volume`, and `cinder-backup` —
   which require the eventlet patch to start. Threading-backend services
-  (`nova-scheduler`, every neutron service) are deliberately excluded:
-  forcing the eventlet patch on them makes their
+  (`nova-scheduler`, every neutron service, `heat-engine`) are deliberately
+  excluded: forcing the eventlet patch on them makes their
   `init_backend(BackendType.THREADING)` call raise
   `BackendAlreadySelected` at import, killing the process. Add a service to
   `otel_eventlet_extra_services` only if it genuinely runs under eventlet and
@@ -195,7 +191,7 @@ See [`defaults/main.yml`](defaults/main.yml). The essentials:
 | `otel_managed_env_label` | Container label recording managed env keys (default `kolla_otel.managed_env`). |
 | `otel_instrument_services` | The target list. Defaults to the per-project `otel_services_*` lists gated by kolla's `enable_<project>` flags; override to take full control. Each entry is `{name, container_name, language}` plus optional `otel_service_name`, `resource_attributes`, `environment`. |
 | `otel_instrument_extra_services` | Additional targets **extending** (not replacing) `otel_instrument_services`, same entry schema. Add your own services here without restating the built-in list. |
-| `otel_eventlet_services` | Service names (by `name`) that get `OTEL_PYTHON_EVENTLET_MONKEY_PATCH=true`. **Defaults to the six eventlet daemons** (`nova-conductor`, `nova-compute`, `cinder-scheduler`, `cinder-volume`, `cinder-backup`, `heat-engine`) — see the eventlet note above. Override with your own list to control exactly which services are patched. |
+| `otel_eventlet_services` | Service names (by `name`) that get `OTEL_PYTHON_EVENTLET_MONKEY_PATCH=true`. **Defaults to the five eventlet daemons** (`nova-conductor`, `nova-compute`, `cinder-scheduler`, `cinder-volume`, `cinder-backup`) — see the eventlet note above. Override with your own list to control exactly which services are patched. |
 | `otel_eventlet_extra_services` | Additional service names **extending** (not replacing) `otel_eventlet_services`. Add a service here only if it genuinely runs under eventlet; do **not** add threading-backend services (nova-scheduler, the neutron family). |
 | `otel_language_defaults` | Built-in per-language image, mount path and activation env (source of truth). |
 | `otel_languages` | Per-language **overrides**, deep-merged onto `otel_language_defaults` (set only the keys you change). |

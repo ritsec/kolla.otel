@@ -189,15 +189,6 @@ class InstrumentationTestCase:
         assert merged == {"a": {"x": 1, "y": 3, "z": 4}, "b": 1, "c": 5}
         assert base == {"a": {"x": 1, "y": 2}, "b": 1}  # unmutated
 
-    def test_python_activation_sets_oslo_service_distro(self) -> None:
-        activation = instr.LANGUAGE_DEFAULTS["python"]["activation"]
-        assert activation["OTEL_PYTHON_DISTRO"] == "oslo_service"
-        assert activation["OTEL_PYTHON_CONFIGURATOR"] == "oslo_service"
-        # only Python carries the oslo.service distro
-        for lang in ("java", "nodejs", "dotnet"):
-            act = instr.LANGUAGE_DEFAULTS[lang]["activation"]
-            assert "OTEL_PYTHON_DISTRO" not in act
-
     def test_default_eventlet_services_classification(self) -> None:
         """The six daemons that call init_backend(EVENTLET) are patched by
         default; threading-backend services (nova-scheduler, neutron family)
@@ -205,7 +196,7 @@ class InstrumentationTestCase:
         init_backend(THREADING) raise BackendAlreadySelected at import."""
         assert set(instr.DEFAULT_EVENTLET_SERVICES) == {
             "nova-conductor", "nova-compute", "cinder-scheduler",
-            "cinder-volume", "cinder-backup", "heat-engine",
+            "cinder-volume", "cinder-backup",
         }
         # threading-backend services must never be in the default list (they
         # crash at import if patched). Pinned so a regression that re-adds

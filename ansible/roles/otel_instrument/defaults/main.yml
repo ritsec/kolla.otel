@@ -110,11 +110,6 @@ otel_language_defaults:
     mount_path: "/otel-auto-instrumentation-python"
     activation:
       PYTHONPATH: "/otel-auto-instrumentation-python/opentelemetry/instrumentation/auto_instrumentation:/otel-auto-instrumentation-python"
-      # OpenStack services build on oslo.service; its OpenTelemetry
-      # distro/configurator wires the SDK up the way OpenStack expects. Applied
-      # as activation so it is always set for the Python agent.
-      OTEL_PYTHON_DISTRO: "oslo_service"
-      OTEL_PYTHON_CONFIGURATOR: "oslo_service"
   java:
     image_component: "autoinstrumentation-java"
     source_path: "/javaagent.jar"
@@ -252,7 +247,6 @@ otel_eventlet_services:
   - cinder-scheduler
   - cinder-volume
   - cinder-backup
-  - heat-engine
 
 # Opt-in for the eventlet monkey-patch. EXTENDS (not replaces)
 # otel_eventlet_services. Add a service here only if it genuinely runs under
