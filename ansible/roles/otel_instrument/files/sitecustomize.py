@@ -55,8 +55,8 @@ if os.environ.get("OTEL_PYTHON_EVENTLET_MONKEY_PATCH", "").lower() in (
     "true", "1", "yes"
 ):
     try:
-        import eventlet.monkey_patch as _monkey_patch
-        _monkey_patch()
+        import eventlet
+        eventlet.monkey_patch()
     except Exception:
         # eventlet not installed — the service will crash later with a more
         # descriptive error; don't mask it here.
@@ -69,8 +69,8 @@ if os.environ.get("OTEL_PYTHON_EVENTLET_MONKEY_PATCH", "").lower() in (
 # file instead of the agent's own sitecustomize.py. We bootstrap the agent
 # explicitly here to ensure it starts.
 try:
-    from opentelemetry.instrumentation.auto_instrumentation._load import _load
-    _load()
+    from opentelemetry.instrumentation.auto_instrumentation import initialize
+    initialize()
     # The agent sets OTEL_PYTHON_CONFIGURATOR to claim it has configured
     # oslo_service. This prevents services (horizon, WSGI APIs) from running
     # their own oslo_service backend init, causing:
