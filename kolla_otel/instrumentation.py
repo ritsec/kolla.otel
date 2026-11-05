@@ -22,6 +22,7 @@ domain logic can be unit-tested without Ansible.
 
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 __all__ = [
@@ -49,6 +50,7 @@ __all__ = [
     "managed_environment",
     "agent_image",
     "stage_paths",
+    "sitecustomize_content",
     "agent_bind",
     "apply_agent_mount",
     "remove_agent_mount",
@@ -532,6 +534,20 @@ def stage_paths(host_lib_path: str, language: str) -> tuple[str, str]:
     """
     base = host_lib_path or DEFAULT_HOST_LIB_PATH
     return f"{base}/{language}", f"{base}/.{language}-image-id"
+
+
+def sitecustomize_content() -> str:
+    """Return the text of the log-correlation ``sitecustomize.py`` filter.
+
+    Read from the role's ``files/`` directory. Raises ``FileNotFoundError``
+    if the file is absent (incomplete installation) — callers should catch
+    and skip gracefully rather than failing the deploy.
+    """
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "ansible" / "roles" / "otel_instrument" / "files" / "sitecustomize.py"
+    )
+    return path.read_text(encoding="utf-8")
 
 
 def agent_bind(host_lib_path: str, language: str, mount_path: str) -> str:

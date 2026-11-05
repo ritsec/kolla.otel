@@ -349,6 +349,12 @@ class ActionModule(ActionBase):
             )
             return module_args
 
+        # Install the log-correlation sitecustomize filter alongside the
+        # staged agent (Python only). The mount root is already on PYTHONPATH,
+        # so Python's `site` module auto-imports it at interpreter startup.
+        if language == "python":
+            self._install_sitecustomize(task_vars, host_lib_path)
+
         # Resolve the exporter endpoint: an external one if configured,
         # otherwise the per-host local collector (deployed by the
         # otel_collector role). It is therefore always well-defined. Resolved
@@ -372,13 +378,14 @@ class ActionModule(ActionBase):
             self._var(task_vars, "otel_resource_attributes_extra", {}) or {},
             service.get("resource_attributes") or {},
         )
-        # Eventlet monkey-patch is opt-in: the list is otel_eventlet_services
-        # (default: empty, so nothing is patched) plus anything the operator
-        # added via otel_eventlet_extra_services (extend, not override). Only
-        # services genuinely running under eventlet belong there — threading-
-        # backend services (nova-scheduler, the neutron family) crash at import
-        # if this patch is forced on them. Layer it as a managed default below
-        # the service's own environment, so an explicit per-service value wins.
+        # Eventlet monkey-patch: the list is otel_eventlet_services (default:
+        # the six daemons that call init_backend(EVENTLET)) plus anything the
+        # operator added via otel_eventlet_extra_services (extend, not
+        # override). Threading-backend services (nova-scheduler, the neutron
+        # family) are excluded from the default — forcing the eventlet patch
+        # on them makes init_backend(THREADING) raise BackendAlreadySelected
+        # at import. Layer it as a managed default below the service's own
+        # environment, so an explicit per-service value wins.
         eventlet_services = self._var(
             task_vars, "otel_eventlet_services", None
         )
@@ -632,3 +639,31 @@ class ActionModule(ActionBase):
 
         _STAGED.add(cache_key)
         return True
+
+    def _install_sitecustomize(self, task_vars, host_lib_path):
+        """Copy the log-correlation ``sitecustomize.py`` into the staged
+        Python agent directory so it is bind-mounted into the container.
+
+        The mount root is already on ``PYTHONPATH``, so Python's ``site``
+        module auto-imports it at interpreter startup — no env-var change
+        needed. Best-effort: a failure here is logged and skipped so it can
+        never break a deploy.
+        """
+        from kolla_otel import instrumentation as instr
+
+        try:
+            content = instr.sitecustomize_content()
+        except (OSError, FileNotFoundError) as exc:
+            display.vvv(f"otel: sitecustomize.py unavailable ({exc}); skipping")
+            return
+
+        dest = f"{host_lib_path}/python/sitecustomize.py"
+        result = self._module(
+            "copy",
+            {"dest": dest, "content": content, "mode": "0644"},
+            task_vars,
+        )
+        if self._failed(result):
+            display.vvv(f"otel: failed to install sitecustomize.py at {dest}")
+        else:
+            display.vvv(f"otel: installed sitecustomize.py -> {dest}")

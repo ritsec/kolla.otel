@@ -199,15 +199,17 @@ class InstrumentationTestCase:
             assert "OTEL_PYTHON_DISTRO" not in act
 
     def test_default_eventlet_services_classification(self) -> None:
-        """Nothing is eventlet-monkey-patched by default: in 2026.1 the
-        services that historically ran on eventlet now request the threading
-        backend, and forcing the eventlet patch first makes their
-        init_backend(THREADING) raise BackendAlreadySelected (kills at import).
-        The patch is now opt-in via otel_eventlet_extra_services."""
-        assert instr.DEFAULT_EVENTLET_SERVICES == []
-        # threading-backend services must never be opted in by default (they
-        # crash at import). Pinned so a regression that re-adds a hardcoded
-        # list is caught.
+        """The six daemons that call init_backend(EVENTLET) are patched by
+        default; threading-backend services (nova-scheduler, neutron family)
+        are excluded — forcing the eventlet patch on them makes their
+        init_backend(THREADING) raise BackendAlreadySelected at import."""
+        assert set(instr.DEFAULT_EVENTLET_SERVICES) == {
+            "nova-conductor", "nova-compute", "cinder-scheduler",
+            "cinder-volume", "cinder-backup", "heat-engine",
+        }
+        # threading-backend services must never be in the default list (they
+        # crash at import if patched). Pinned so a regression that re-adds
+        # them is caught.
         assert not set(instr.DEFAULT_EVENTLET_SERVICES) & {
             "nova-scheduler",
             "neutron-server",
@@ -257,18 +259,23 @@ class InstrumentationTestCase:
         assert nova_only == instr.DEFAULT_SERVICE_GROUPS["nova"]["services"]
 
     def test_eventlet_environment(self) -> None:
-        # default (empty list): no service is patched
-        assert (
-            instr.eventlet_environment(
-                "nova-conductor", instr.DEFAULT_EVENTLET_SERVICES
-            )
-            == {}
-        )
-        # opt-in: an explicit list still patches the named service
+        # nova-conductor IS in the default six-service list → patched
+        assert instr.eventlet_environment(
+            "nova-conductor", instr.DEFAULT_EVENTLET_SERVICES
+        ) == {"OTEL_PYTHON_EVENTLET_MONKEY_PATCH": "true"}
+        # keystone is NOT in the default list → not patched
+        assert instr.eventlet_environment(
+            "keystone", instr.DEFAULT_EVENTLET_SERVICES
+        ) == {}
+        # nova-scheduler is deliberately excluded (threading backend) → not patched
+        assert instr.eventlet_environment(
+            "nova-scheduler", instr.DEFAULT_EVENTLET_SERVICES
+        ) == {}
+        # an explicit list still patches the named service
         assert instr.eventlet_environment(
             "nova-conductor", ["nova-conductor"]
         ) == {"OTEL_PYTHON_EVENTLET_MONKEY_PATCH": "true"}
-        # a service not in the opt-in list is not patched
+        # a service not in the explicit list is not patched
         assert instr.eventlet_environment("keystone", ["nova-conductor"]) == {}
         assert instr.eventlet_environment("nova-conductor", []) == {}
         assert instr.eventlet_environment("nova-conductor", None) == {}

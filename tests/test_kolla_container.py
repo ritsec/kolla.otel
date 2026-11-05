@@ -376,19 +376,28 @@ class KollaContainerActionTestCase:
         assert env["OTEL_PYTHON_DISTRO"] == "oslo_service"
         assert env["OTEL_PYTHON_CONFIGURATOR"] == "oslo_service"
 
-    def test_no_eventlet_patch_by_default(self):
-        """No service is eventlet-monkey-patched by default: in 2026.1 the
-        services that historically ran on eventlet now request the threading
-        backend, and forcing the eventlet patch first kills them at import
-        (BackendAlreadySelected). The patch is opt-in via
-        otel_eventlet_extra_services; the service is still instrumented."""
+    def test_eventlet_patch_applied_to_default_services(self):
+        """nova-conductor is in DEFAULT_EVENTLET_SERVICES and gets the
+        eventlet monkey-patch by default. The service is still fully
+        instrumented (distro + activation applied)."""
         sink = {}
         args = dict(_TARGET_ARGS, name="nova_conductor")
         _plugin(args, sink).run(task_vars=dict(_ENABLED))
         env = sink["args"]["environment"]
-        assert "OTEL_PYTHON_EVENTLET_MONKEY_PATCH" not in env
+        assert env["OTEL_PYTHON_EVENTLET_MONKEY_PATCH"] == "true"
         assert env["OTEL_PYTHON_DISTRO"] == "oslo_service"
         assert "kolla_otel.managed_env" in sink["args"]["labels"]
+
+    def test_no_eventlet_patch_for_threading_services(self):
+        """nova-scheduler (threading backend) must NOT be monkey-patched even
+        though it is instrumented — forcing the eventlet patch on it would
+        make init_backend(THREADING) raise BackendAlreadySelected at import."""
+        sink = {}
+        args = dict(_TARGET_ARGS, name="nova_scheduler")
+        _plugin(args, sink).run(task_vars=dict(_ENABLED))
+        env = sink["args"]["environment"]
+        assert "OTEL_PYTHON_EVENTLET_MONKEY_PATCH" not in env
+        assert env["OTEL_PYTHON_DISTRO"] == "oslo_service"
 
     def test_wsgi_service_has_no_monkey_patch(self):
         """A uWSGI/mod_wsgi service (keystone) must NOT be monkey-patched."""
@@ -402,20 +411,20 @@ class KollaContainerActionTestCase:
         assert "kolla_otel.managed_env" in sink["args"]["labels"]
 
     def test_eventlet_extra_services_opt_in(self):
-        """otel_eventlet_extra_services opts a service into the eventlet
-        monkey-patch (the built-in default is now empty). A service not in the
-        list is left unpatched."""
+        """otel_eventlet_extra_services EXTENDS the default eventlet list:
+        a service added there (even one not in the built-in default) gets the
+        monkey-patch. A service in neither list is left unpatched."""
         task_vars = dict(_ENABLED, otel_eventlet_extra_services=["nova-api"])
-        # nova-api is opted in via the extra list.
+        # nova-api is opted in via the extra list (not in the default six).
         sink = {}
         _plugin(_TARGET_ARGS, sink).run(task_vars=task_vars)
         assert (
             sink["args"]["environment"]["OTEL_PYTHON_EVENTLET_MONKEY_PATCH"]
             == "true"
         )
-        # ...a service not in the opt-in list is left unpatched.
+        # keystone is in neither the default list nor the extra list → unpatched.
         sink2 = {}
-        _plugin(dict(_TARGET_ARGS, name="nova_conductor"), sink2).run(
+        _plugin(dict(_TARGET_ARGS, name="keystone"), sink2).run(
             task_vars=task_vars
         )
         assert (

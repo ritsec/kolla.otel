@@ -54,19 +54,19 @@ Python targets get two OpenStack-aware defaults out of the box:
   `OTEL_PYTHON_CONFIGURATOR=oslo_service` are set as part of the Python
   language activation (override via `otel_languages`), so the agent bootstraps
   the way OpenStack (oslo.service) expects.
-- **eventlet monkey-patching (opt-in).** `OTEL_PYTHON_EVENTLET_MONKEY_PATCH`
-  is set only for services listed in `otel_eventlet_services` +
-  `otel_eventlet_extra_services`. The default `otel_eventlet_services` is
-  **empty**: in 2026.1 the services that historically ran on eventlet now
-  request the threading backend (`nova-scheduler` via
-  `monkey_patch.patch(backend='threading')`, every neutron service via
-  `init_backend(BackendType.THREADING)`), and forcing the eventlet patch first
-  makes those `init_backend` calls raise `BackendAlreadySelected` — killing the
-  service at import. The OpenStack instrumentation is backend-agnostic, so
-  tracing is not lost. Add a service to `otel_eventlet_extra_services` only if
-  it genuinely runs under eventlet and needs cross-green-thread context
-  propagation; do **not** add threading-backend services (nova-scheduler, the
-  neutron family) there.
+- **eventlet monkey-patching.** `OTEL_PYTHON_EVENTLET_MONKEY_PATCH` is set
+  for services in `otel_eventlet_services` + `otel_eventlet_extra_services`.
+  The default list covers the six daemons that call
+  `init_backend(BackendType.EVENTLET)` — `nova-conductor`, `nova-compute`,
+  `cinder-scheduler`, `cinder-volume`, `cinder-backup`, and `heat-engine` —
+  which require the eventlet patch to start. Threading-backend services
+  (`nova-scheduler`, every neutron service) are deliberately excluded:
+  forcing the eventlet patch on them makes their
+  `init_backend(BackendType.THREADING)` call raise
+  `BackendAlreadySelected` at import, killing the process. Add a service to
+  `otel_eventlet_extra_services` only if it genuinely runs under eventlet and
+  needs cross-green-thread context propagation; do **not** add
+  threading-backend services there.
 
 ### Declarative environment
 
