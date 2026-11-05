@@ -22,7 +22,6 @@ domain logic can be unit-tested without Ansible.
 
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
 __all__ = [
@@ -536,18 +535,106 @@ def stage_paths(host_lib_path: str, language: str) -> tuple[str, str]:
     return f"{base}/{language}", f"{base}/.{language}-image-id"
 
 
-def sitecustomize_content() -> str:
-    """Return the text of the log-correlation ``sitecustomize.py`` filter.
+# ---------------------------------------------------------------------------
+# Log-correlation bootstrap (sitecustomize.py)
+# ---------------------------------------------------------------------------
+# Embedded as a string so the action-plugin path has no file dependency:
+# it works identically from a source checkout and from ``pip install .``
+# (where Hatch places the Ansible tree under ``share/kolla-ansible/ansible``,
+# not adjacent to ``kolla_otel/``). The canonical copy in
+# ``ansible/roles/otel_instrument/files/sitecustomize.py`` is the same
+# content, kept for the explicit role path that copies it directly.
+_SITECUSTOMIZE_PY = '''\
+"""kolla-otel log-correlation bootstrap.
 
-    Read from the role's ``files/`` directory. Raises ``FileNotFoundError``
-    if the file is absent (incomplete installation) — callers should catch
-    and skip gracefully rather than failing the deploy.
+Guarantees ``record.otelTraceID`` and ``record.otelSpanID`` exist on every
+log record before any handler or formatter sees it, eliminating the::
+
+    ValueError: Formatting field not found in record: 'otelTraceID'
+
+crash that occurs when a green thread (eventlet) or any background thread
+emits a log line while no OTel span is active.
+
+When an OTel span *is* active the real 32/16-hex IDs are stamped; otherwise
+the OTel-spec all-zero "invalid" IDs are used so the Datadog log-pipeline
+grok rule still matches and uncorrelated lines pass through with a
+valid-but-null ID instead of raising.
+
+Mechanism
+---------
+Patches ``logging.Logger.handle`` so the IDs are set before the normal
+handle path (filter check → handler dispatch) runs. This covers every logger
+instance and every handler regardless of creation order.
+
+The module is auto-imported by Python's :mod:`site` mechanism: it is staged
+into the agent mount directory which is already on ``PYTHONPATH``.
+
+Safety
+------
+The patched code never raises: any import or SDK error falls through to the
+zero-ID default, so a partially-initialised agent can not take down a
+service's log output.
+"""
+
+import logging
+
+_ZERO_TRACE_ID = "0" * 32   # OTel "invalid trace ID"
+_ZERO_SPAN_ID = "0" * 16    # OTel "invalid span ID"
+
+
+def _ensure_otel_ids(record):
+    """Set ``otelTraceID`` / ``otelSpanID`` on *record* if not already present.
+
+    Reads the active OTel span when one exists; otherwise stamps the all-zero
+    "invalid" IDs so format strings referencing ``%(otelTraceID)s`` and
+    ``%(otelSpanID)s`` always resolve.
     """
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "ansible" / "roles" / "otel_instrument" / "files" / "sitecustomize.py"
-    )
-    return path.read_text(encoding="utf-8")
+    # Already stamped by a preceding filter (e.g. the OTel agent's own
+    # log-correlation filter) — leave the real IDs alone.
+    if getattr(record, "otelTraceID", None) and getattr(record, "otelSpanID", None):
+        return
+
+    trace_id = _ZERO_TRACE_ID
+    span_id = _ZERO_SPAN_ID
+    try:
+        from opentelemetry.trace import get_current_span  # noqa: WPS433
+        ctx = get_current_span().get_span_context()
+        if ctx is not None and getattr(ctx, "is_valid", False):
+            trace_id = format(ctx.trace_id, "032x")
+            span_id = format(ctx.span_id, "016x")
+    except Exception:
+        # SDK not loaded, no active span, or any other error — fall through to
+        # the zero-ID default. Never propagate an exception from here: it would
+        # break the service's log output entirely.
+        pass
+
+    record.otelTraceID = trace_id
+    record.otelSpanID = span_id
+
+
+# --- Patch Logger.handle -----------------------------------------------------
+_original_handle = logging.Logger.handle
+
+
+def _patched_handle(self, record):
+    _ensure_otel_ids(record)
+    return _original_handle(self, record)
+
+
+logging.Logger.handle = _patched_handle
+'''
+
+
+def sitecustomize_content() -> str:
+    """Return the text of the log-correlation ``sitecustomize.py`` bootstrap.
+
+    The content is embedded in this module so it is available regardless of
+    whether the package is used from a source checkout or installed via
+    ``pip install .`` (where Hatch relocates the Ansible tree under
+    ``share/kolla-ansible/ansible`` and the file-path relative lookup used
+    to fail silently, skipping the log-correlation installation).
+    """
+    return _SITECUSTOMIZE_PY
 
 
 def agent_bind(host_lib_path: str, language: str, mount_path: str) -> str:
