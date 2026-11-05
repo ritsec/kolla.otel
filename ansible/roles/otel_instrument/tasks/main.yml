@@ -127,6 +127,21 @@
     loop_var: otel_stage_language
     label: "{{ otel_stage_language }}"
 
+# Install the log-correlation sitecustomize filter alongside the staged agent.
+# Placed after the staging loop (which wipes and repopulates the host directory)
+# so the file survives re-staging. The mount root is already on PYTHONPATH, so
+# Python's `site` module auto-imports it at interpreter startup — no extra env
+# var change is needed.
+- name: "OTel stage | Install log-correlation sitecustomize for Python services"
+  when:
+    - otel_action == 'instrument'
+    - "'python' in (otel_present_services | map(attribute='language') | unique | list)"
+  become: true
+  ansible.builtin.copy:
+    src: sitecustomize.py
+    dest: "{{ otel_host_lib_path }}/python/sitecustomize.py"
+    mode: "0644"
+
 - name: Inject OpenTelemetry into each present container
   when: otel_action == 'instrument'
   ansible.builtin.include_tasks: inject.yml

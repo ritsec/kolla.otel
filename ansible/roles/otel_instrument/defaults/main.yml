@@ -237,20 +237,22 @@ otel_instrument_extra_services: []
 # agent to eventlet-monkey-patch before instrumenting. Any target whose name is
 # in this list gets OTEL_PYTHON_EVENTLET_MONKEY_PATCH=true.
 #
-# Default is EMPTY. Recent oslo.service (2026.1) has services that previously
-# ran on eventlet now *request the threading backend explicitly*:
-#   nova-scheduler -> nova.monkey_patch.patch(backend='threading')
-#   every neutron  -> neutron.cmd.server/agents __init__
-#                     -> init_backend(BackendType.THREADING)
-# Applying the eventlet patch first selects the eventlet backend, so those
-# init_backend(THREADING) calls raise oslo_service BackendAlreadySelected and
-# kill the process at import (service never starts). The OpenStack
-# instrumentation (oslo-log / oslo-messaging / keystonemiddleware /
-# openstacksdk) is backend-agnostic, so omitting the patch does not lose
-# tracing. Opt a service in via otel_eventlet_extra_services only when it
-# genuinely runs under eventlet and needs cross-green-thread context
-# propagation.
-otel_eventlet_services: []
+# Default: the daemons that call init_backend(BackendType.EVENTLET). The
+# threading-backend services (nova-scheduler, every neutron service) are
+# deliberately excluded: in 2026.1 they call init_backend(BackendType.THREADING)
+# (or nova.monkey_patch.patch(backend='threading')), and applying the eventlet
+# patch first makes those calls raise oslo_service BackendAlreadySelected,
+# killing the process at import. The WSGI/mod_wsgi API servers (keystone,
+# nova-api, cinder-api, glance-api, heat-api, placement-api) never call
+# init_backend, so they are excluded too. Add your own eventlet services via
+# otel_eventlet_extra_services.
+otel_eventlet_services:
+  - nova-conductor
+  - nova-compute
+  - cinder-scheduler
+  - cinder-volume
+  - cinder-backup
+  - heat-engine
 
 # Opt-in for the eventlet monkey-patch. EXTENDS (not replaces)
 # otel_eventlet_services. Add a service here only if it genuinely runs under

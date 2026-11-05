@@ -409,20 +409,26 @@ DEFAULT_SERVICES: list[dict[str, Any]] = [
 EVENTLET_ENV_KEY = "OTEL_PYTHON_EVENTLET_MONKEY_PATCH"
 
 #: Service names (the hyphenated ``name``) that get the eventlet monkey-patch by
-#: default. EMPTY on purpose: recent oslo.service (2026.1) has services that
-#: previously ran on eventlet now request the threading backend explicitly
-#: (nova-scheduler via ``nova.monkey_patch.patch(backend='threading')``; every
-#: neutron service via ``neutron.cmd.server/agents.__init__ ->
-#: init_backend(BackendType.THREADING)``). Applying the eventlet patch first
-#: selects the eventlet backend, so those calls raise
-#: ``oslo_service BackendAlreadySelected`` and kill the process at import.
-#: The OpenStack instrumentation (oslo-log / oslo-messaging / keystonemiddleware
-#: / openstacksdk) is backend-agnostic, so tracing is not lost. Opt a service in
-#: via ``otel_eventlet_extra_services`` only when it genuinely runs under
-#: eventlet and needs cross-green-thread context propagation. Mirrors
-#: ``otel_eventlet_services`` in the role defaults (kept in sync by
-#: test_instrumentation.py).
-DEFAULT_EVENTLET_SERVICES: list[str] = []
+#: default. Only the daemons that call ``init_backend(BackendType.EVENTLET)``
+#: are listed; the threading-backend services (nova-scheduler, every neutron
+#: service) are deliberately excluded — in 2026.1 they call
+#: ``init_backend(BackendType.THREADING)`` (or
+#: ``nova.monkey_patch.patch(backend='threading')``) and would raise
+#: ``oslo_service BackendAlreadySelected`` if the eventlet patch selected the
+#: eventlet backend first. The WSGI/mod_wsgi API servers (keystone, nova-api,
+#: cinder-api, glance-api, heat-api, placement-api) are also excluded because
+#: they never call ``init_backend``. Extend with
+#: ``otel_eventlet_extra_services`` for services that genuinely run under
+#: eventlet. Mirrors ``otel_eventlet_services`` in the role defaults (kept in
+#: sync by test_instrumentation.py).
+DEFAULT_EVENTLET_SERVICES: list[str] = [
+    "nova-conductor",
+    "nova-compute",
+    "cinder-scheduler",
+    "cinder-volume",
+    "cinder-backup",
+    "heat-engine",
+]
 
 
 def deep_merge(
