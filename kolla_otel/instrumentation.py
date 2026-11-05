@@ -118,10 +118,14 @@ LANGUAGE_DEFAULTS: dict[str, dict[str, Any]] = {
         "source_path": "/autoinstrumentation",
         "mount_path": "/otel-auto-instrumentation-python",
         "activation": {
+            # Our directory comes FIRST so Python's site module finds and
+            # imports OUR sitecustomize.py (not the agent's). Our
+            # sitecustomize bootstraps the agent explicitly, then applies
+            # the log-correlation patch.
             "PYTHONPATH": (
+                "/otel-auto-instrumentation-python:"
                 "/otel-auto-instrumentation-python/opentelemetry/"
-                "instrumentation/auto_instrumentation:"
-                "/otel-auto-instrumentation-python"
+                "instrumentation/auto_instrumentation"
             ),
         },
     },
@@ -539,71 +543,77 @@ def stage_paths(host_lib_path: str, language: str) -> tuple[str, str]:
 # ``ansible/roles/otel_instrument/files/sitecustomize.py`` is the same
 # content, kept for the explicit role path that copies it directly.
 _SITECUSTOMIZE_PY = '''\
-"""kolla-otel log-correlation bootstrap.
+"""kolla-otel startup bootstrap.
 
-Guarantees ``record.otelTraceID`` and ``record.otelSpanID`` exist on every
-log record before any handler or formatter sees it, eliminating the::
+This module is imported by Python's :mod:`site` mechanism at interpreter
+startup (before any user code). It runs BEFORE the OTel agent because our
+directory comes first in ``PYTHONPATH`` — so this file shadows the agent's
+own ``sitecustomize.py``.
 
-    ValueError: Formatting field not found in record: 'otelTraceID'
+Responsibilities (in order):
 
-crash that occurs when a green thread (eventlet) or any background thread
-emits a log line while no OTel span is active.
+1. **Early eventlet monkey-patch.** If ``OTEL_PYTHON_EVENTLET_MONKEY_PATCH``
+   is set, calls ``eventlet.monkey_patch()`` immediately so that threading
+   primitives are green-aware before any other import. This prevents
+   ``BackendAlreadySelected`` crashes in eventlet daemons (nova-compute,
+   nova-conductor, cinder-*).
 
-Also applies ``eventlet.monkey_patch()`` early — before the OTel agent loads
-— when ``OTEL_PYTHON_EVENTLET_MONKEY_PATCH=true``. This is required because
-the agent's ``oslo_service`` distro imports threading-based modules and calls
-``init_backend(THREADING)`` during its own initialisation; if the eventlet
-patch is not already in place at that point, ``nova-conductor`` (and the
-other eventlet daemons) then fail with::
+2. **Agent bootstrap.** Explicitly loads the OTel auto-instrumentation
+   package (equivalent to what the agent's own ``sitecustomize.py`` does).
+   Without this step the agent would never start, because its own
+   ``sitecustomize.py`` is shadowed by this file.
 
-    oslo_service.backend.exceptions.BackendAlreadySelected:
-        Backend already set to 'threading', cannot reinitialize with 'eventlet'
+3. **Log-correlation patch.** Patches ``logging.Logger.handle`` so that
+   ``record.otelTraceID`` and ``record.otelSpanID`` are always set before
+   any handler or formatter sees the record. When an OTel span is active
+   the real 32/16-hex IDs are stamped; otherwise the OTel-spec all-zero
+   "invalid" IDs are used. This eliminates::
 
-Applying the patch from ``sitecustomize`` — which runs at interpreter
-startup, before any user imports — guarantees the correct ordering.
+       ValueError: Formatting field not found in record: 'otelTraceID'
 
-When an OTel span *is* active the real 32/16-hex IDs are stamped; otherwise
-the OTel-spec all-zero "invalid" IDs are used so the Datadog log-pipeline
-grok rule still matches and uncorrelated lines pass through with a
-valid-but-null ID instead of raising.
-
-Mechanism
----------
-1. If ``OTEL_PYTHON_EVENTLET_MONKEY_PATCH`` is ``true``, calls
-   ``eventlet.monkey_patch()`` immediately (before any other import).
-   The call is idempotent — eventlet tracks applied patches and skips them
-   on subsequent calls — so the OTel agent's own later call is a safe no-op.
-2. Patches ``logging.Logger.handle`` so the IDs are set before the normal
-   handle path (filter check → handler dispatch) runs. This covers every
-   logger instance and every handler regardless of creation order.
-
-The module is auto-imported by Python's :mod:`site` mechanism: it is staged
-into the agent mount directory which is already on ``PYTHONPATH``.
+   which occurs when a green thread or background task emits a log line
+   while no span is active and the format string references
+   ``%(otelTraceID)s``.
 
 Safety
 ------
-All patched code never raises: any import or SDK error falls through to a
-safe default, so a partially-initialised agent can not take down a service's
-log output or prevent it from starting.
+Every step is wrapped in try/except so a failure in one step does not
+prevent the remaining steps from running. A partially-initialised agent
+cannot take down a service's log output or prevent it from starting.
 """
 
 import os
+import sys
+import logging as _logging
 
 # ---------------------------------------------------------------------------
-# Early eventlet monkey-patch
+# 1. Early eventlet monkey-patch
 # ---------------------------------------------------------------------------
-if os.environ.get("OTEL_PYTHON_EVENTLET_MONKEY_PATCH", "").lower() in ("true", "1", "yes"):
+if os.environ.get("OTEL_PYTHON_EVENTLET_MONKEY_PATCH", "").lower() in (
+    "true", "1", "yes"
+):
     try:
-        import eventlet.monkey_patch as _monkey_patch  # noqa: E402
+        import eventlet.monkey_patch as _monkey_patch
         _monkey_patch()
     except Exception:
         pass
 
 # ---------------------------------------------------------------------------
-# Log-correlation bootstrap
+# 2. Bootstrap the OTel agent
 # ---------------------------------------------------------------------------
+try:
+    from opentelemetry.instrumentation.auto_instrumentation._load import _load
+    _load()
+except ImportError:
+    pass
+except Exception as _exc:
+    _logging.getLogger("kolla_otel").warning(
+        "OTel agent bootstrap failed: %s", _exc
+    )
 
-import logging  # noqa: E402
+# ---------------------------------------------------------------------------
+# 3. Log-correlation patch
+# ---------------------------------------------------------------------------
 
 _ZERO_TRACE_ID = "0" * 32   # OTel "invalid trace ID"
 _ZERO_SPAN_ID = "0" * 16    # OTel "invalid span ID"
@@ -616,8 +626,6 @@ def _ensure_otel_ids(record):
     "invalid" IDs so format strings referencing ``%(otelTraceID)s`` and
     ``%(otelSpanID)s`` always resolve.
     """
-    # Already stamped by a preceding filter (e.g. the OTel agent's own
-    # log-correlation filter) — leave the real IDs alone.
     if getattr(record, "otelTraceID", None) and getattr(record, "otelSpanID", None):
         return
 
@@ -630,17 +638,13 @@ def _ensure_otel_ids(record):
             trace_id = format(ctx.trace_id, "032x")
             span_id = format(ctx.span_id, "016x")
     except Exception:
-        # SDK not loaded, no active span, or any other error — fall through to
-        # the zero-ID default. Never propagate an exception from here: it would
-        # break the service's log output entirely.
         pass
 
     record.otelTraceID = trace_id
     record.otelSpanID = span_id
 
 
-# --- Patch Logger.handle -----------------------------------------------------
-_original_handle = logging.Logger.handle
+_original_handle = _logging.Logger.handle
 
 
 def _patched_handle(self, record):
@@ -648,7 +652,7 @@ def _patched_handle(self, record):
     return _original_handle(self, record)
 
 
-logging.Logger.handle = _patched_handle
+_logging.Logger.handle = _patched_handle
 '''
 
 
